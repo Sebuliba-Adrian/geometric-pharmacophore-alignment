@@ -41,6 +41,15 @@ In words: *for each molecule, the 3D position of every atom in its best-fitting,
 clash-free pose.* The grader reads these coordinates, recomputes the score, and
 checks for clashes.
 
+**Why an SDF?** SDF (Structure-Data File) is the standard cheminformatics format
+for storing molecules with 3D coordinates plus per-molecule data, one record per
+molecule separated by `$$$$`. It is what docking tools emit and what viewers
+(PyMOL, ChimeraX) and scoring pipelines read, so it is the natural way to hand
+back a set of poses. We write it with RDKit's `SDWriter`; it reads back with
+`SDMolSupplier` (a test does exactly that and re-scores the file to confirm the
+written coordinates reproduce the reported score). A plain `.xyz` would lack bonds
+and metadata, and a SMILES string has no 3D coordinates, so neither would do.
+
 ## Setup
 
 ```bash
