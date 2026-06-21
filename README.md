@@ -103,54 +103,58 @@ correspondence seed + weighted Kabsch + ICP refine -> scipy polish on the true
 weighted-Gaussian score -> reject clashes -> best pose per target (best of several
 deterministic seeds) -> SDF.`
 
-Kabsch is exact for a fixed feature-to-site correspondence; ICP finds the
-correspondence by alternating nearest-assignment and Kabsch; the polish then
+Kabsch is exact for a fixed feature-to-site correspondence; ICP refines a pose to a
+*locally stable* nearest-neighbour correspondence by alternating nearest-assignment
+and Kabsch (it is not guaranteed to be the best correspondence); the polish then
 optimises the true (weighted, saturating) objective that Kabsch's RMSD only
-approximates, with a smooth penalty that keeps atoms out of the exclusion spheres.
+approximates. The polish adds a smooth penalty that *discourages* clashes; a final
+hard clash check is what *guarantees* every emitted pose is clash-free.
 
 ## How the approach evolved
 
-Each stage was kept until a concrete limitation forced the next one. Score is the
-achieved fraction of the maximum possible (the sum of site weights).
+Each stage was kept until a concrete limitation forced the next one. These are the
+development steps and the reasoning behind them; the final, reproducible score per
+target is in the Results table above (the intermediate per-stage numbers from
+development are not reproducible from this repo, so they are omitted).
 
-1. **Brute force (~40%).** Generate conformers, then slide and spin the molecule
-   across a grid of positions and orientations, score each placement, keep the best
-   clash-free one.
+1. **Brute force.** Generate conformers, then slide and spin the molecule across a
+   grid of positions and orientations, score each placement, keep the best clash-free
+   one.
    *Abandoned because:* the search is 6-dimensional (3 for position, 3 for
    orientation). A grid fine enough to land features on the sites is astronomically
    large, while an affordable grid is far too coarse to align well. Searching the
    pose space directly cannot win here.
 
-2. **Kabsch from correspondences (~46%).** Stop searching rotations: once you decide
-   which feature atom should sit on which site, Kabsch returns the optimal rotation
-   and translation in a single closed-form step.
+2. **Kabsch from correspondences.** Stop searching rotations: once you decide which
+   feature atom should sit on which site, Kabsch returns the optimal rotation and
+   translation in a single closed-form step.
    *Abandoned because:* Kabsch must be told the pairing, and guessing pairings at
    random wastes almost every attempt, especially for flexible ligands with many
    candidate atoms.
 
-3. **ICP refine (~48%).** Find the pairing automatically: at the current pose, match
-   each site to its nearest matching atom, Kabsch onto that, and repeat until the
-   matching stops changing.
-   *Abandoned because:* Kabsch and ICP minimise straight-line distance (RMSD), but
-   the task scores a weighted, saturating Gaussian and forbids clashes, so the
-   lowest-RMSD pose is not the highest-scoring pose.
+3. **ICP refine.** Improve the pairing automatically: at the current pose, match each
+   site to its nearest matching atom, Kabsch onto that, and repeat until the matching
+   stops changing (a *locally* stable assignment, not necessarily the best one).
+   *Abandoned because:* Kabsch and ICP minimise straight-line distance (RMSD), but the
+   task scores a weighted, saturating Gaussian and forbids clashes, so the lowest-RMSD
+   pose is not the highest-scoring pose.
 
-4. **scipy polish on the true objective (~51%).** Seeded from the ICP pose, locally
-   optimise the actual weighted-Gaussian score, with a smooth penalty that pushes
-   atoms out of the exclusion spheres.
+4. **scipy polish on the true objective.** Seeded from the ICP pose, locally optimise
+   the actual weighted-Gaussian score, with a smooth penalty that *discourages*
+   clashes (a final hard check then rejects any pose that still clashes).
    *Abandoned because:* the score was being computed against feature centroids and an
    MMFF-altered molecule, not what the spec asks for or what gets written to the SDF.
 
-5. **Per-atom scoring fix (~59%).** Score the nearest matching *atom* (as the spec
-   states), and dock on the exact heavy-atom molecule that is emitted. This also
-   removed an MMFF aromaticity bug, so the reported score equals the graded score.
+5. **Per-atom scoring fix.** Score the nearest matching *atom* (as the spec states),
+   and dock on the exact heavy-atom molecule that is emitted. This also removed an
+   MMFF aromaticity bug, so the reported score equals the graded score.
    *Abandoned because:* a single run still converges to one local optimum, and
    flexible ligands land very differently depending on the random starting pose.
 
-6. **Multi-seed best-of-K (~66%).** Run several deterministic seeds (different
-   conformers and starting poses) and keep the best surviving pose.
-   *Where it stops:* this is a strong heuristic, not a proof of the global optimum,
-   which no tractable method can guarantee for a problem of this shape.
+6. **Multi-seed best-of-K.** Run several deterministic seeds (different conformers and
+   starting poses) and keep the best surviving pose.
+   *Where it stops:* this is a strong heuristic; it does not attempt to certify the
+   global optimum.
 
 ## Design decisions / assumptions
 
@@ -176,10 +180,11 @@ achieved fraction of the maximum possible (the sum of site weights).
 
 ## Limitations and future work
 
-Some targets are near their geometric ceiling (target_2 especially: a rigid molecule
-whose same-family sites cannot all be satisfied at once), so not every target can
-reach a high percentage. The levers most likely to raise the real score, roughly in
-order of payoff:
+Not every target can necessarily reach a high percentage: a rigid molecule with
+several same-family sites may be geometrically unable to satisfy them all at once,
+for instance. I have not established how close any target's score is to its true
+maximum, so the figures above are what this method achieves, not proven ceilings.
+The levers most likely to raise the real score, roughly in order of payoff:
 
 - **Richer conformer sampling** - generate more conformers and keep a diverse,
   low-energy subset (energy window + RMS clustering). The right fold for a flexible
@@ -190,8 +195,11 @@ order of payoff:
   what production docking engines do).
 - **Stronger local polish** - basin-hopping (several perturbed restarts) and
   polishing more candidates, to recover sub-Angstrom gains.
-- **Smarter correspondence search** - Hungarian assignment per family and geometric
-  pruning (only pair feature triples whose internal distances match the site triple).
+- **Smarter correspondence search** - e.g. geometric pruning (only pair feature
+  triples whose internal distances match the site triple). A one-to-one assignment
+  such as Hungarian could *seed* alignment, but note the score is intentionally
+  many-to-one (sites may share an atom), so it cannot replace the nearest-atom
+  scoring.
 
 Any gains should come from better *search*, not from loosening the chemical feature
 definitions: that would inflate the reported number without matching how a grader
