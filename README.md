@@ -70,6 +70,50 @@ correspondence by alternating nearest-assignment and Kabsch; the polish then
 optimises the true (weighted, saturating) objective that Kabsch's RMSD only
 approximates, with a smooth penalty that keeps atoms out of the exclusion spheres.
 
+## How the approach evolved
+
+Each stage was kept until a concrete limitation forced the next one. Score is the
+achieved fraction of the maximum possible (the sum of site weights).
+
+1. **Brute force (~40%).** Generate conformers, then slide and spin the molecule
+   across a grid of positions and orientations, score each placement, keep the best
+   clash-free one.
+   *Abandoned because:* the search is 6-dimensional (3 for position, 3 for
+   orientation). A grid fine enough to land features on the sites is astronomically
+   large, while an affordable grid is far too coarse to align well. Searching the
+   pose space directly cannot win here.
+
+2. **Kabsch from correspondences (~46%).** Stop searching rotations: once you decide
+   which feature atom should sit on which site, Kabsch returns the optimal rotation
+   and translation in a single closed-form step.
+   *Abandoned because:* Kabsch must be told the pairing, and guessing pairings at
+   random wastes almost every attempt, especially for flexible ligands with many
+   candidate atoms.
+
+3. **ICP refine (~48%).** Find the pairing automatically: at the current pose, match
+   each site to its nearest matching atom, Kabsch onto that, and repeat until the
+   matching stops changing.
+   *Abandoned because:* Kabsch and ICP minimise straight-line distance (RMSD), but
+   the task scores a weighted, saturating Gaussian and forbids clashes, so the
+   lowest-RMSD pose is not the highest-scoring pose.
+
+4. **scipy polish on the true objective (~51%).** Seeded from the ICP pose, locally
+   optimise the actual weighted-Gaussian score, with a smooth penalty that pushes
+   atoms out of the exclusion spheres.
+   *Abandoned because:* the score was being computed against feature centroids and an
+   MMFF-altered molecule, not what the spec asks for or what gets written to the SDF.
+
+5. **Per-atom scoring fix (~59%).** Score the nearest matching *atom* (as the spec
+   states), and dock on the exact heavy-atom molecule that is emitted. This also
+   removed an MMFF aromaticity bug, so the reported score equals the graded score.
+   *Abandoned because:* a single run still converges to one local optimum, and
+   flexible ligands land very differently depending on the random starting pose.
+
+6. **Multi-seed best-of-K (~66%).** Run several deterministic seeds (different
+   conformers and starting poses) and keep the best surviving pose.
+   *Where it stops:* this is a strong heuristic, not a proof of the global optimum,
+   which no tractable method can guarantee for a problem of this shape.
+
 ## Design decisions / assumptions
 
 - **Score is per-ATOM:** the spec scores `d_i` to the "nearest ligand ATOM whose
