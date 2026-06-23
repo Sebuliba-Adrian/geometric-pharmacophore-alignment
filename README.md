@@ -28,6 +28,7 @@ The complete solver is in `pharmacophore_solver.py`.
 - [Results](#results)
 - [Small maths toolkit](#small-maths-toolkit)
 - [How the solver works](#how-the-solver-works)
+- [End-to-end worked example](#end-to-end-worked-example)
 - [Why the search is practical](#why-the-search-is-practical)
 - [How the approach evolved](#how-the-approach-evolved)
 - [Important design decisions](#important-design-decisions)
@@ -426,7 +427,18 @@ ICP means Iterative Closest Point. It repeats two simple actions:
 The loop stops when the pairs stop changing. This produces a locally stable
 alignment, but not a proof of the globally best pose.
 
-A small example:
+The picture below is a real run of this loop in 2D. From a rough start, all three
+sites happen to be nearest the same atom; one Kabsch step swings the ligand into
+place, the nearest-atom choices spread out (the two changed pairings are highlighted),
+and a second pass leaves them unchanged, so ICP stops.
+
+![ICP in three panels: assign each site its nearest atom, Kabsch-align those pairs, then reassign and converge when the pairings stop changing](docs/icp.svg)
+
+For simplicity, this diagram assumes the three sites belong to the same feature
+family, which is why they can all match the same atom. In the full solver each site
+only ever matches atoms of its own family.
+
+A small example in numbers:
 
 ```text
 Site S has two matching atoms nearby.
@@ -702,6 +714,112 @@ Kabsch and ICP minimise *geometric distance* between points; Nelder-Mead minimis
 the *objective the task actually defines*. That is why the pipeline runs the
 geometric steps first to get close, then hands off to Nelder-Mead for the final
 score-driven nudge.
+
+## End-to-end worked example
+
+The previous section explained each stage on its own. This section threads one tiny
+example through all of them, so the whole pipeline reads as a single story. The
+molecule and the target are made up and kept flat (`z = 0`) so every number can be
+checked with a calculator. The real solver runs the identical steps in 3D using
+RDKit; the actual results follow at the end.
+
+**The target.** Three interaction sites and one forbidden sphere:
+
+```text
+site D (donor)       at (0, 0)   weight 1
+site A (acceptor)    at (4, 0)   weight 2
+site H (hydrophobe)  at (2, 3)   weight 1
+excluded sphere      centre (2, 1)  radius 1.2
+
+maximum possible score = sum of weights = 4
+```
+
+**Stage 1, SMILES to a shape.** A SMILES string says which atoms are connected.
+RDKit turns it into a 3D conformer. Skip to one conformer of a small three-atom
+ligand, written in the molecule's own frame:
+
+```text
+atom d at (0, 0)
+atom a at (4, 0)
+atom h at (2, 2.6)
+```
+
+**Stage 2, identify atom types.** RDKit labels `d` a donor, `a` an acceptor, and `h`
+a hydrophobe.
+
+**Stage 3, a starting pose.** The conformer arrives somewhere arbitrary. Say it is
+rotated `35` degrees and shifted by `(1, 0.8)`:
+
+```text
+d -> (1.000, 0.800)
+a -> (4.277, 3.094)
+h -> (1.147, 4.077)
+```
+
+**Stage 4, correspondence.** Each site pairs with an atom of its own family, so here
+`D-d`, `A-a`, `H-h`.
+
+**Stage 5, Kabsch alignment.** Centre both sets, then read off the single rotation
+and translation that best overlay the pairs:
+
+```text
+centroid of atoms = (2.141, 2.657)
+centroid of sites = (2.000, 1.000)
+rotation found    = -35 degrees   (it undoes the 35-degree start)
+translation found = (-1.278, 0.052)
+
+aligned positions:
+d -> (0.000, 0.133)
+a -> (4.000, 0.133)
+h -> (2.000, 2.733)
+```
+
+**Stage 6, ICP.** Reassign each site to its nearest same-family atom. With one atom
+per family the pairs cannot change, so ICP converges immediately. (The three-panel
+ICP figure earlier shows the interesting case where the pairs *do* change.)
+
+**Stage 7, score.** Measure each site to its matched atom and apply
+`weight x exp(-(d / 1.25)^2)`:
+
+| site | distance `d` | `exp(-(d/1.25)^2)` | weight | site score |
+|---|---:|---:|---:|---:|
+| D | 0.133 | 0.989 | 1 | 0.989 |
+| A | 0.133 | 0.989 | 2 | 1.977 |
+| H | 0.267 | 0.956 | 1 | 0.956 |
+| **total** | | | | **3.922** |
+
+So the pose scores `3.922 / 4 = 98.0%`. It is not a perfect `100%` because atom `h`
+sits slightly low, and Kabsch spreads that small mismatch across all three pairs.
+
+**Stage 8, polish.** Nelder-Mead now nudges the six pose numbers to push the score
+higher against the real Gaussian-plus-penalty objective. This toy is already close,
+so the polish changes the pose only slightly.
+
+**Stage 9, clash check.** Measure every atom to the sphere centre and reject the pose
+if any distance is below `radius - 0.1 = 1.1`:
+
+```text
+d: distance 2.180  ok
+a: distance 2.180  ok
+h: distance 1.733  ok
+```
+
+No atom is inside the boundary, so the pose is allowed.
+
+**Stage 10, write the SDF.** The final coordinates become one record in
+`docked_poses.sdf`:
+
+```text
+atom d (donor)       x=0.000  y=0.133  z=0.000
+atom a (acceptor)    x=4.000  y=0.133  z=0.000
+atom h (hydrophobe)  x=2.000  y=2.733  z=0.000
+```
+
+**The real result.** On the actual bundled targets the same pipeline runs in 3D. Its
+validated numbers are in the [Results](#results) table above: ibuprofen (`target_1`)
+reaches `89.0%` of its maximum score, and the five targets together reach `66.4%`.
+Those percentages are checked against the molecules read back from `docked_poses.sdf`,
+so they are exactly what the grader sees.
 
 ## Why the search is practical
 
