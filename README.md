@@ -18,6 +18,23 @@ For each target, it:
 
 The complete solver is in `pharmacophore_solver.py`.
 
+## Contents
+
+- [The idea in plain English](#the-idea-in-plain-english)
+- [Input and output](#input-and-output)
+- [Setup](#setup)
+- [Run](#run)
+- [Test](#test)
+- [Results](#results)
+- [Small maths toolkit](#small-maths-toolkit)
+- [How the solver works](#how-the-solver-works)
+- [Why the search is practical](#why-the-search-is-practical)
+- [How the approach evolved](#how-the-approach-evolved)
+- [Important design decisions](#important-design-decisions)
+- [Limitations and possible improvements](#limitations-and-possible-improvements)
+- [Glossary](#glossary)
+- [References](#references)
+
 ## The idea in plain English
 
 Imagine a poseable toy and several coloured dots floating in a room.
@@ -450,7 +467,7 @@ Intuition:
 This bell-shaped falloff is called a Gaussian. It rewards close matches strongly
 without creating a sudden score jump at one arbitrary distance.
 
-![Scoring kernel: per-site weight equals exp(-(d/1.25)^2), which is 1.0 at zero distance and falls to 0.37 at d = 1.25 A](docs/score_curve.svg)
+![Scoring kernel: the score fraction equals exp(-(d/1.25)^2), which is 1.0 at zero distance and falls to 0.37 at d = 1.25 A; the per-site score is this fraction times the site weight](docs/score_curve.svg)
 
 `exp(x)` means the exponential function `eˣ`, where `e ≈ 2.718`. A calculator
 normally evaluates it. The important part is how its input changes with distance.
@@ -555,6 +572,48 @@ derivative is unavailable, unreliable, or inconvenient. That fits this objective
 the nearest matching atom can switch abruptly, and clash handling also makes the
 landscape less friendly to ordinary gradient methods.
 
+#### Gradient descent vs Nelder-Mead: a worked example
+
+It helps to see both methods on a simple bowl-shaped function where the answer is
+known. Take:
+
+```text
+f(x, y) = (x - 3)² + (y - 2)²
+```
+
+The lowest point is `(x, y) = (3, 2)`, where `f = 0`. Picture `(x, y)` as a location
+and `f` as the ground height.
+
+A gradient method *calculates* the slope and walks straight downhill. The slope of
+`f` is `(2(x - 3), 2(y - 2))`. Starting at `(0, 0)` with step size `0.25`:
+
+```text
+(0, 0)        f = 13
+(1.5, 1.0)    f = 3.25
+(2.25, 1.5)   f = 0.8125
+(2.625, 1.75) f = 0.2031
+... -> (3, 2) f = 0
+```
+
+Nelder-Mead never computes that slope. It starts with a triangle, say
+`A = (0,0)` with `f = 13`, `B = (1,0)` with `f = 8`, `C = (0,1)` with `f = 10`. `A`
+is the worst corner, so it is reflected through the midpoint of `B` and `C` to a
+trial point `D = (1,1)`, where `f = 5`. That is better, so the triangle moves, and
+repeating the step walks it down to the same `(3, 2)`:
+
+![Gradient descent versus Nelder-Mead on f = (x-3)^2 + (y-2)^2: the gradient path follows the computed slope while the Nelder-Mead simplex compares sampled heights, and both reach the minimum at (3, 2)](docs/nelder_mead_example.svg)
+
+| approach | information it uses | result |
+|---|---|---|
+| gradient descent | the formula and its derivatives | `(3, 2)`, `f ≈ 0` |
+| Nelder-Mead | only objective values at trial points | `(3, 2)`, `f ≈ 0` |
+
+Both reach the same answer; only the route differs. On a smooth bowl like this the
+gradient method is actually faster. The reason this solver prefers Nelder-Mead is
+that its real objective is *not* smooth: when the nearest matching atom switches, the
+objective has kinks where there may be no single well-defined gradient. Nelder-Mead
+only ever asks "what score does this pose give?", which is always answerable.
+
 ### 8. Handle forbidden spheres
 
 During polishing, a smooth penalty makes penetrating an excluded sphere
@@ -595,8 +654,54 @@ Kabsch, ICP, and Nelder-Mead are local methods: their answer depends on where th
 start. The solver therefore tries multiple deterministic conformers and starting
 alignments, removes near-duplicate candidates, and keeps the best safe result.
 
+The word **seed** can mean two different things here, and they are worth separating:
+
+- a **random seed** is just a fixed number (the solver uses values like 7, 42, 123)
+  that makes the pseudo-random steps repeatable. Run it again with the same number
+  and you get the same conformers and the same starting pairings.
+- a **starting point** (sometimes loosely called a search seed) is an initial guess
+  of the pose, from which the local methods begin improving. It is not a biological
+  seed and it is not the random number; it is just where the climb begins.
+- a **correspondence seed** is one specific way to build that starting point: an
+  initial proposed atom-to-site pairing, which is then turned into a starting pose by
+  Kabsch before ICP and Nelder-Mead refine it.
+
+Picture several students looking for the highest hilltop in thick fog. One starts
+near the road, one near the river, one near the trees. Each follows the same climbing
+rule but may end on a different hill, so the group keeps the highest point anyone
+reached. The solver does the same with poses:
+
+```text
+start 1 -> conformer A + initial pairing -> final score 5.1
+start 2 -> conformer B + initial pairing -> final score 7.0
+start 3 -> conformer C + initial pairing -> final score 6.2
+keep start 2's result: 7.0
+```
+
+Fixed random seeds make that whole process reproducible; using several starting
+points makes the result less dependent on any one lucky or unlucky beginning.
+
 This is a reproducible best-of-many heuristic. It does not prove that the global
 maximum has been found.
+
+### How Kabsch, ICP, and Nelder-Mead relate
+
+The solver leans on three classic techniques. Two are geometric (they find a spatial
+transformation), one is a general optimiser (it tunes parameters of any function).
+They stack: initial correspondences provide the first pairs, ICP updates them, Kabsch
+aligns each updated pairing, and Nelder-Mead polishes the resulting pose against the
+real score.
+
+| technique | what it is | how it works | role in this solver |
+|---|---|---|---|
+| **Kabsch** | exact best-fit rigid alignment for *known* point pairs | centre both sets, build a covariance matrix, take its SVD to read off the optimal rotation (then the translation) | given a fixed atom-to-site pairing, find the single rotation and translation that best overlay them |
+| **ICP** | aligns two point sets when the pairing is *unknown* | repeat: pair each point with its current nearest neighbour, then run Kabsch on those pairs, until it settles | refine the pairing the alignment is based on (Kabsch runs inside each ICP step) |
+| **Nelder-Mead** | derivative-free optimiser for a black-box function | move a simplex (here 7 corners over 6 pose parameters) downhill by reflection, expansion, contraction, and shrink | polish the pose against the true Gaussian score plus clash penalty, which Kabsch does not optimise directly |
+
+Kabsch and ICP minimise *geometric distance* between points; Nelder-Mead minimises
+the *objective the task actually defines*. That is why the pipeline runs the
+geometric steps first to get close, then hands off to Nelder-Mead for the final
+score-driven nudge.
 
 ## Why the search is practical
 
@@ -644,6 +749,26 @@ RMSD turns many atom-by-atom differences into one typical-distance number.
 
 6. **Multi-start search:** repeat from several deterministic shapes and placements,
    then keep the best valid result. This reduces dependence on one local optimum.
+
+The evolution did not stop because the problem was solved; it stopped where the
+time box ended. The natural next stages, not implemented here, would be:
+
+7. **Flexible-bond refinement:** after rigid placement, relax a few rotatable bonds
+   so the conformer can adapt to the sites instead of staying frozen. Rigid
+   conformers are a plausible limitation on the hardest targets.
+
+8. **Global search around the local polish:** wrap basin-hopping or simulated
+   annealing around the starting points, instead of a fixed multi-start set, to
+   escape local optima more systematically.
+
+9. **Richer conformer ensembles:** the remaining score gap on the hardest targets
+   likely traces to conformer diversity rather than the alignment mathematics, which
+   would make this a high-value change to try.
+
+Honest summary of what to try first: conformer diversity and global search look like
+the most promising levers, since the alignment mathematics is already exact for the
+pairs it is given. These stages are expanded, with trade-offs, in
+[Limitations and possible improvements](#limitations-and-possible-improvements).
 
 ## Important design decisions
 
@@ -707,6 +832,12 @@ output should match the grader's chemical interpretation.
   distant result may exist.
 - **Global optimum:** the best result anywhere in the entire search space.
 - **Random seed:** a fixed starting number that makes pseudo-random work repeatable.
+  Distinct from a starting point.
+- **Starting point (search seed):** an initial guess of the pose from which the local
+  methods begin improving; not the random number and not a biological seed.
+- **Correspondence seed:** an initial proposed atom-to-site pairing used to build a
+  starting pose.
+- **Multi-start search:** trying several starting points and keeping the best result.
 - **SDF:** a molecular file format that stores atoms, bonds, coordinates, and
   properties.
 - **Ångström (Å):** a unit commonly used for atomic distances; `1 Å = 10⁻¹⁰ m`.
@@ -720,3 +851,12 @@ output should match the grader's chemical interpretation.
   *Acta Crystallographica Section A* 32 (1976).
 - Hunter Heidenreich, "Kabsch Algorithm: NumPy, PyTorch, TensorFlow, and JAX":
   <https://hunterheidenreich.com/posts/kabsch-algorithm/>
+- LearnOpenCV, "Iterative Closest Point (ICP) Explained":
+  <https://learnopencv.com/iterative-closest-point-icp-explained/>
+- Nelder-Mead method (overview): <https://en.wikipedia.org/wiki/Nelder%E2%80%93Mead_method>
+- Machine Learning Mastery, "How to Use Nelder-Mead Optimization in Python":
+  <https://machinelearningmastery.com/how-to-use-nelder-mead-optimization-in-python/>
+- Mathias Brandewinder, "Breaking down Nelder-Mead":
+  <https://brandewinder.com/2022/03/31/breaking-down-Nelder-Mead/>
+- Hadrien Crassous, "Nelder-Mead algorithm":
+  <https://medium.com/@crassoushadrien/nelder-mead-algorithm-a9075162722e>
